@@ -1,0 +1,686 @@
+import { useState, useEffect, useCallback } from "react";
+
+// ============================================================
+// DREW FUTBOL — API KEY INTEGRADA (football-data.org)
+// ============================================================
+const API_KEY = "3d64b2eb42d54e74b9fcca7f1e32b4e3";
+const API_BASE = "https://api.football-data.org/v4";
+
+// TV Broadcast mapping by competition
+const TV_CHANNELS = {
+  PL:   ["ESPN", "Star+", "Sky Sports"],
+  PD:   ["ESPN", "Star+", "DirecTV Sports"],
+  BL1:  ["ESPN", "Star+"],
+  SA:   ["ESPN", "Star+", "RAI Sport"],
+  FL1:  ["ESPN", "Star+", "beIN Sports"],
+  CL:   ["ESPN", "Star+", "Movistar+"],
+  EC:   ["ESPN", "Star+", "DirecTV"],
+  ELC:  ["ESPN2"],
+  PPL:  ["ESPN3"],
+  DED:  ["ESPN", "Star+"],
+  BSA:  ["ESPN", "Star+"],
+  EL:   ["ESPN", "Star+"],
+  CLI:  ["ESPN", "Star+"],
+  WC:   ["Televisa", "TV Azteca", "RCN", "Canal Caracol"],
+  "FPC": ["Win Sports", "Win Sports+", "RCN", "Canal Caracol"],
+};
+
+const LEAGUE_INFO = {
+  PL:   { name: "Premier League", country: "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra", code: "PL" },
+  PD:   { name: "La Liga", country: "🇪🇸 España", code: "PD" },
+  BL1:  { name: "Bundesliga", country: "🇩🇪 Alemania", code: "BL1" },
+  SA:   { name: "Serie A", country: "🇮🇹 Italia", code: "SA" },
+  FL1:  { name: "Ligue 1", country: "🇫🇷 Francia", code: "FL1" },
+  CL:   { name: "Champions League", country: "🌍 Europa", code: "CL" },
+  EL:   { name: "Europa League", country: "🌍 Europa", code: "EL" },
+  EC:   { name: "Eurocopa", country: "🌍 Europa", code: "EC" },
+  WC:   { name: "Copa del Mundo", country: "🌐 Mundial", code: "WC" },
+  CLI:  { name: "Copa Libertadores", country: "🌎 Sudamérica", code: "CLI" },
+  BSA:  { name: "Serie A Brasil", country: "🇧🇷 Brasil", code: "BSA" },
+  DED:  { name: "Eredivisie", country: "🇳🇱 Holanda", code: "DED" },
+  PPL:  { name: "Primeira Liga", country: "🇵🇹 Portugal", code: "PPL" },
+  ELC:  { name: "Championship", country: "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra", code: "ELC" },
+  FPC:  { name: "Liga BetPlay (FPC)", country: "🇨🇴 Colombia", code: "FPC" },
+};
+
+const LEAGUE_IDS = {
+  PL: 2021, PD: 2014, BL1: 2002, SA: 2019, FL1: 2015,
+  CL: 2001, EL: 2146, DED: 2003, PPL: 2017, BSA: 2013,
+  ELC: 2016, CLI: 2152,
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
+async function fetchFD(endpoint) {
+  try {
+    const res = await fetch(`${API_BASE}${endpoint}`, {
+      headers: { "X-Auth-Token": API_KEY },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+function statusLabel(status) {
+  const map = {
+    SCHEDULED: "Programado", TIMED: "Por jugar", IN_PLAY: "En Vivo",
+    PAUSED: "Medio tiempo", FINISHED: "Final", POSTPONED: "Aplazado",
+    CANCELLED: "Cancelado", SUSPENDED: "Suspendido",
+  };
+  return map[status] || status;
+}
+
+function statusColor(status) {
+  if (status === "IN_PLAY" || status === "PAUSED") return "#00ff87";
+  if (status === "FINISHED") return "#8888aa";
+  return "#f0c040";
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  return d.toLocaleDateString("es-CO", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function formatTime(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  return d.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" });
+}
+
+// Crest with fallback
+function TeamCrest({ url, name, size = 32 }) {
+  const [err, setErr] = useState(false);
+  if (!err && url) {
+    return (
+      <img
+        src={url} alt={name} width={size} height={size}
+        style={{ objectFit: "contain", filter: "drop-shadow(0 2px 6px #0006)" }}
+        onError={() => setErr(true)}
+      />
+    );
+  }
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: "50%",
+      background: "linear-gradient(135deg,#1a2a4a,#00ff87)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontSize: size * 0.4, fontWeight: 900, color: "#fff",
+    }}>
+      {(name || "?")[0]}
+    </div>
+  );
+}
+
+// ============================================================
+// COMPONENTS
+// ============================================================
+
+function MatchCard({ match, channels }) {
+  const isLive = match.status === "IN_PLAY" || match.status === "PAUSED";
+  const isFinished = match.status === "FINISHED";
+
+  return (
+    <div style={{
+      background: isLive
+        ? "linear-gradient(135deg,#0a1628ee,#001a0eee)"
+        : "linear-gradient(135deg,#0d1526ee,#111827ee)",
+      border: isLive ? "1px solid #00ff8766" : "1px solid #ffffff11",
+      borderRadius: 16, padding: "16px 20px", marginBottom: 12,
+      boxShadow: isLive ? "0 0 24px #00ff8722" : "0 4px 20px #00000055",
+      transition: "all .3s",
+      position: "relative", overflow: "hidden",
+    }}>
+      {isLive && (
+        <div style={{
+          position: "absolute", top: 0, left: 0, right: 0, height: 2,
+          background: "linear-gradient(90deg,transparent,#00ff87,transparent)",
+          animation: "pulse 2s infinite",
+        }} />
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        {/* Home */}
+        <div style={{ flex: 1, textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10 }}>
+          <span style={{ fontFamily: "'Oswald',sans-serif", fontSize: 14, fontWeight: 600, color: "#e8eaf6" }}>
+            {match.homeTeam?.shortName || match.homeTeam?.name}
+          </span>
+          <TeamCrest url={match.homeTeam?.crest} name={match.homeTeam?.name} size={36} />
+        </div>
+        {/* Score / Time */}
+        <div style={{ width: 90, textAlign: "center", padding: "0 8px" }}>
+          {(isLive || isFinished) ? (
+            <div style={{
+              fontFamily: "'Oswald',sans-serif", fontSize: 22, fontWeight: 900,
+              color: isLive ? "#00ff87" : "#fff",
+              letterSpacing: 2,
+            }}>
+              {match.score?.fullTime?.home ?? 0} – {match.score?.fullTime?.away ?? 0}
+            </div>
+          ) : (
+            <div style={{ color: "#f0c040", fontSize: 13, fontWeight: 700 }}>
+              {formatTime(match.utcDate)}
+            </div>
+          )}
+          <div style={{
+            fontSize: 10, fontWeight: 700, marginTop: 4, padding: "2px 8px",
+            borderRadius: 20, background: isLive ? "#00ff8722" : "#ffffff11",
+            color: statusColor(match.status), letterSpacing: 1,
+          }}>
+            {isLive && <span style={{ marginRight: 4 }}>●</span>}
+            {statusLabel(match.status)}
+          </div>
+        </div>
+        {/* Away */}
+        <div style={{ flex: 1, textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
+          <TeamCrest url={match.awayTeam?.crest} name={match.awayTeam?.name} size={36} />
+          <span style={{ fontFamily: "'Oswald',sans-serif", fontSize: 14, fontWeight: 600, color: "#e8eaf6" }}>
+            {match.awayTeam?.shortName || match.awayTeam?.name}
+          </span>
+        </div>
+      </div>
+      {/* TV Channels */}
+      {channels && channels.length > 0 && (
+        <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+          <span style={{ fontSize: 11, color: "#8899bb", marginRight: 4 }}>📺</span>
+          {channels.map(ch => (
+            <span key={ch} style={{
+              fontSize: 11, padding: "2px 10px", borderRadius: 20,
+              background: "#ffffff0d", border: "1px solid #ffffff1a",
+              color: "#aabbdd", fontWeight: 600,
+            }}>{ch}</span>
+          ))}
+        </div>
+      )}
+      {/* Date */}
+      <div style={{ textAlign: "center", marginTop: 6, fontSize: 11, color: "#556677" }}>
+        {formatDate(match.utcDate)}
+      </div>
+    </div>
+  );
+}
+
+function StandingsTable({ standings }) {
+  if (!standings || standings.length === 0) return (
+    <div style={{ textAlign: "center", color: "#556677", padding: 40 }}>Sin datos de tabla disponibles</div>
+  );
+  const table = standings[0]?.table || [];
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ color: "#8899bb", borderBottom: "1px solid #ffffff15" }}>
+            {["#", "Equipo", "PJ", "G", "E", "P", "GF", "GC", "DG", "Pts"].map(h => (
+              <th key={h} style={{ padding: "8px 6px", textAlign: h === "Equipo" ? "left" : "center", fontFamily: "'Oswald',sans-serif", fontWeight: 500, letterSpacing: .5 }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.map((row, i) => (
+            <tr key={row.team.id} style={{
+              borderBottom: "1px solid #ffffff08",
+              background: i < 4 ? "#00ff8708" : i < 6 ? "#4488ff08" : "transparent",
+              transition: "background .2s",
+            }}>
+              <td style={{ padding: "8px 6px", textAlign: "center", color: i < 4 ? "#00ff87" : i < 6 ? "#4488ff" : "#8899bb", fontWeight: 700 }}>{row.position}</td>
+              <td style={{ padding: "8px 6px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <TeamCrest url={row.team.crest} name={row.team.name} size={22} />
+                  <span style={{ color: "#dde8ff", fontWeight: 600 }}>{row.team.shortName || row.team.name}</span>
+                </div>
+              </td>
+              {[row.playedGames, row.won, row.draw, row.lost, row.goalsFor, row.goalsAgainst, row.goalDifference].map((v, j) => (
+                <td key={j} style={{ padding: "8px 6px", textAlign: "center", color: "#aabbcc" }}>{v}</td>
+              ))}
+              <td style={{ padding: "8px 6px", textAlign: "center", color: "#fff", fontWeight: 900, fontFamily: "'Oswald',sans-serif", fontSize: 15 }}>{row.points}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function NewsCard({ title, summary, source, date, url }) {
+  return (
+    <a href={url || "#"} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
+      <div style={{
+        background: "linear-gradient(135deg,#0d1526,#111827)",
+        border: "1px solid #ffffff11", borderRadius: 14, padding: "16px 18px",
+        marginBottom: 12, cursor: "pointer", transition: "all .3s",
+        boxShadow: "0 4px 20px #00000044",
+      }}
+        onMouseEnter={e => e.currentTarget.style.borderColor = "#00ff8755"}
+        onMouseLeave={e => e.currentTarget.style.borderColor = "#ffffff11"}
+      >
+        <div style={{ fontFamily: "'Oswald',sans-serif", fontSize: 15, fontWeight: 700, color: "#e8eaf6", lineHeight: 1.4, marginBottom: 8 }}>{title}</div>
+        <div style={{ fontSize: 13, color: "#8899bb", lineHeight: 1.6 }}>{summary}</div>
+        <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", fontSize: 11, color: "#445566" }}>
+          <span style={{ color: "#00ff8788", fontWeight: 700 }}>{source}</span>
+          <span>{date}</span>
+        </div>
+      </div>
+    </a>
+  );
+}
+
+// ============================================================
+// MAIN APP
+// ============================================================
+export default function DrewFutbol() {
+  const [activeTab, setActiveTab] = useState("matches");
+  const [activeLeague, setActiveLeague] = useState("PL");
+  const [matches, setMatches] = useState([]);
+  const [standings, setStandings] = useState([]);
+  const [news, setNews] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [matchFilter, setMatchFilter] = useState("ALL");
+  const [newsLoading, setNewsLoading] = useState(false);
+  const [scorers, setScorers] = useState([]);
+
+  const leagueId = LEAGUE_IDS[activeLeague];
+  const tvChannels = TV_CHANNELS[activeLeague] || ["ESPN", "Star+"];
+
+  // Fetch matches
+  const fetchMatches = useCallback(async () => {
+    if (!leagueId) return;
+    setLoading(true);
+    const today = new Date();
+    const from = new Date(today); from.setDate(from.getDate() - 7);
+    const to = new Date(today); to.setDate(to.getDate() + 14);
+    const fmt = d => d.toISOString().split("T")[0];
+    const data = await fetchFD(`/competitions/${leagueId}/matches?dateFrom=${fmt(from)}&dateTo=${fmt(to)}`);
+    setMatches(data?.matches || []);
+    setLoading(false);
+  }, [leagueId]);
+
+  // Fetch standings
+  const fetchStandings = useCallback(async () => {
+    if (!leagueId) return;
+    const data = await fetchFD(`/competitions/${leagueId}/standings`);
+    setStandings(data?.standings || []);
+  }, [leagueId]);
+
+  // Fetch scorers
+  const fetchScorers = useCallback(async () => {
+    if (!leagueId) return;
+    const data = await fetchFD(`/competitions/${leagueId}/scorers?limit=15`);
+    setScorers(data?.scorers || []);
+  }, [leagueId]);
+
+  // Fetch news via Claude API
+  const fetchNews = useCallback(async () => {
+    setNewsLoading(true);
+    const leagueName = LEAGUE_INFO[activeLeague]?.name || activeLeague;
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          messages: [{
+            role: "user",
+            content: `Busca las 6 noticias más recientes e importantes sobre ${leagueName}. Devuelve SOLO un JSON array con este formato exacto, sin markdown ni backticks:
+[{"title":"...","summary":"resumen de 2 oraciones","source":"nombre del medio","date":"fecha reciente","url":"url si disponible"}]`
+          }]
+        })
+      });
+      const data = await res.json();
+      const text = data.content?.map(b => b.text || "").join("") || "[]";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const start = clean.indexOf("[");
+      const end = clean.lastIndexOf("]");
+      if (start !== -1 && end !== -1) {
+        const parsed = JSON.parse(clean.slice(start, end + 1));
+        setNews(parsed);
+      }
+    } catch {
+      setNews([]);
+    }
+    setNewsLoading(false);
+  }, [activeLeague]);
+
+  useEffect(() => {
+    fetchMatches();
+    fetchStandings();
+    fetchScorers();
+    if (activeTab === "news") fetchNews();
+  }, [activeLeague]);
+
+  useEffect(() => {
+    if (activeTab === "news" && news.length === 0) fetchNews();
+  }, [activeTab]);
+
+  const filteredMatches = matches.filter(m => {
+    const q = searchQuery.toLowerCase();
+    const matchesSearch = !q || m.homeTeam?.name?.toLowerCase().includes(q) || m.awayTeam?.name?.toLowerCase().includes(q);
+    const matchesFilter = matchFilter === "ALL" ||
+      (matchFilter === "LIVE" && (m.status === "IN_PLAY" || m.status === "PAUSED")) ||
+      (matchFilter === "FINISHED" && m.status === "FINISHED") ||
+      (matchFilter === "UPCOMING" && (m.status === "SCHEDULED" || m.status === "TIMED"));
+    return matchesSearch && matchesFilter;
+  });
+
+  const liveCount = matches.filter(m => m.status === "IN_PLAY" || m.status === "PAUSED").length;
+
+  const tabs = [
+    { id: "matches", label: "Partidos", icon: "⚽" },
+    { id: "standings", label: "Tabla", icon: "📊" },
+    { id: "scorers", label: "Goleadores", icon: "🥅" },
+    { id: "news", label: "Noticias", icon: "📰" },
+  ];
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "linear-gradient(160deg,#060d1a 0%,#0a1628 40%,#0b1520 100%)",
+      fontFamily: "'Inter',sans-serif",
+      color: "#e8eaf6",
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+        ::-webkit-scrollbar{width:4px;height:4px}
+        ::-webkit-scrollbar-track{background:#0a1628}
+        ::-webkit-scrollbar-thumb{background:#00ff8744;border-radius:4px}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+        @keyframes livePulse{0%,100%{box-shadow:0 0 0 0 #00ff8744}70%{box-shadow:0 0 0 8px #00ff8700}}
+        @keyframes slideIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+      `}</style>
+
+      {/* HEADER */}
+      <div style={{
+        background: "linear-gradient(180deg,#06111f,#0a1628)",
+        borderBottom: "1px solid #ffffff0d",
+        padding: "0 20px",
+        position: "sticky", top: 0, zIndex: 100,
+        boxShadow: "0 4px 40px #000000aa",
+      }}>
+        <div style={{ maxWidth: 900, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 0" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{
+                width: 42, height: 42, borderRadius: 12,
+                background: "linear-gradient(135deg,#00ff87,#00d4ff)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 22, boxShadow: "0 0 20px #00ff8744",
+              }}>⚽</div>
+              <div>
+                <div style={{ fontFamily: "'Oswald',sans-serif", fontSize: 22, fontWeight: 900, letterSpacing: 1, lineHeight: 1, background: "linear-gradient(90deg,#00ff87,#00d4ff)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+                  DREW FUTBOL
+                </div>
+                <div style={{ fontSize: 10, color: "#556677", letterSpacing: 2, textTransform: "uppercase" }}>
+                  Datos en tiempo real
+                </div>
+              </div>
+            </div>
+            {liveCount > 0 && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6,
+                background: "#00ff8715", border: "1px solid #00ff8733",
+                borderRadius: 20, padding: "6px 14px",
+                animation: "livePulse 2s infinite",
+              }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#00ff87", animation: "pulse 1s infinite" }} />
+                <span style={{ color: "#00ff87", fontSize: 12, fontWeight: 700 }}>{liveCount} EN VIVO</span>
+              </div>
+            )}
+          </div>
+
+          {/* League selector */}
+          <div style={{ display: "flex", gap: 4, overflowX: "auto", paddingBottom: 12, paddingTop: 4 }}>
+            {Object.entries(LEAGUE_INFO).map(([code, info]) => (
+              <button key={code} onClick={() => setActiveLeague(code)} style={{
+                flexShrink: 0, padding: "6px 14px", borderRadius: 20, border: "1px solid",
+                borderColor: activeLeague === code ? "#00ff87" : "#ffffff15",
+                background: activeLeague === code ? "#00ff8720" : "transparent",
+                color: activeLeague === code ? "#00ff87" : "#8899bb",
+                fontSize: 12, fontWeight: 600, cursor: "pointer",
+                transition: "all .2s", whiteSpace: "nowrap",
+              }}>
+                {info.country.split(" ")[0]} {info.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* MAIN */}
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px" }}>
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 20, background: "#0d1526", borderRadius: 14, padding: 4 }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+              flex: 1, padding: "10px 4px", borderRadius: 10, border: "none",
+              background: activeTab === t.id ? "linear-gradient(135deg,#00ff8720,#00d4ff15)" : "transparent",
+              color: activeTab === t.id ? "#00ff87" : "#667788",
+              borderBottom: activeTab === t.id ? "2px solid #00ff87" : "2px solid transparent",
+              fontSize: 13, fontWeight: 700, cursor: "pointer", transition: "all .2s",
+            }}>
+              {t.icon} {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* League badge */}
+        <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ fontFamily: "'Oswald',sans-serif", fontSize: 20, fontWeight: 700, color: "#fff" }}>
+            {LEAGUE_INFO[activeLeague]?.name}
+          </div>
+          <div style={{ fontSize: 13, color: "#556677" }}>
+            {LEAGUE_INFO[activeLeague]?.country}
+          </div>
+          {!leagueId && (
+            <div style={{ fontSize: 11, background: "#f0c04020", border: "1px solid #f0c04040", color: "#f0c040", borderRadius: 20, padding: "2px 10px" }}>
+              Datos vía noticias
+            </div>
+          )}
+        </div>
+
+        {/* MATCHES TAB */}
+        {activeTab === "matches" && (
+          <div style={{ animation: "slideIn .3s ease" }}>
+            {/* Filters */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+              <input
+                placeholder="Buscar equipo..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                style={{
+                  flex: 1, minWidth: 160, padding: "8px 14px", borderRadius: 10,
+                  border: "1px solid #ffffff15", background: "#0d1526",
+                  color: "#e8eaf6", fontSize: 13, outline: "none",
+                }}
+              />
+              {["ALL", "LIVE", "UPCOMING", "FINISHED"].map(f => (
+                <button key={f} onClick={() => setMatchFilter(f)} style={{
+                  padding: "8px 14px", borderRadius: 10, border: "1px solid",
+                  borderColor: matchFilter === f ? "#00ff87" : "#ffffff15",
+                  background: matchFilter === f ? "#00ff8720" : "transparent",
+                  color: matchFilter === f ? "#00ff87" : "#8899bb",
+                  fontSize: 12, fontWeight: 600, cursor: "pointer",
+                }}>
+                  {f === "ALL" ? "Todos" : f === "LIVE" ? "🔴 En vivo" : f === "UPCOMING" ? "Próximos" : "Finalizados"}
+                </button>
+              ))}
+            </div>
+
+            {/* TV info */}
+            <div style={{
+              background: "#0d1526", border: "1px solid #ffffff0d",
+              borderRadius: 12, padding: "10px 16px", marginBottom: 16,
+              display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <span style={{ fontSize: 18 }}>📺</span>
+              <div>
+                <div style={{ fontSize: 11, color: "#556677", marginBottom: 4 }}>Dónde ver {LEAGUE_INFO[activeLeague]?.name}:</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {tvChannels.map(ch => (
+                    <span key={ch} style={{
+                      fontSize: 12, fontWeight: 700, padding: "2px 12px", borderRadius: 20,
+                      background: "linear-gradient(90deg,#00ff8720,#00d4ff15)",
+                      border: "1px solid #00ff8733", color: "#00ff87",
+                    }}>{ch}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {loading ? (
+              <div style={{ textAlign: "center", padding: 60 }}>
+                <div style={{ fontSize: 32, marginBottom: 12, animation: "pulse 1s infinite" }}>⚽</div>
+                <div style={{ color: "#556677" }}>Cargando partidos...</div>
+              </div>
+            ) : !leagueId ? (
+              <div style={{
+                textAlign: "center", padding: 50, color: "#556677",
+                background: "#0d1526", borderRadius: 16, border: "1px solid #ffffff0d",
+              }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>⚽</div>
+                <div style={{ fontFamily: "'Oswald',sans-serif", fontSize: 18, color: "#8899bb", marginBottom: 8 }}>
+                  {LEAGUE_INFO[activeLeague]?.name}
+                </div>
+                <div style={{ fontSize: 13, color: "#445566", marginBottom: 20 }}>
+                  Esta liga no está disponible en el plan actual de la API.<br />
+                  Consulta las noticias para datos actualizados.
+                </div>
+                <button onClick={() => setActiveTab("news")} style={{
+                  padding: "10px 24px", borderRadius: 20, border: "none",
+                  background: "linear-gradient(90deg,#00ff87,#00d4ff)",
+                  color: "#000", fontWeight: 700, cursor: "pointer", fontSize: 13,
+                }}>Ver Noticias de la Liga</button>
+              </div>
+            ) : filteredMatches.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 50, color: "#556677" }}>
+                No hay partidos en este rango de fechas
+              </div>
+            ) : (
+              filteredMatches.map(m => (
+                <MatchCard key={m.id} match={m} channels={tvChannels} />
+              ))
+            )}
+          </div>
+        )}
+
+        {/* STANDINGS TAB */}
+        {activeTab === "standings" && (
+          <div style={{ animation: "slideIn .3s ease" }}>
+            {!leagueId ? (
+              <div style={{ textAlign: "center", padding: 50, color: "#556677" }}>
+                Liga no disponible en la API
+              </div>
+            ) : (
+              <div style={{
+                background: "#0d1526", border: "1px solid #ffffff0d",
+                borderRadius: 16, padding: 16,
+              }}>
+                <div style={{ marginBottom: 12, display: "flex", gap: 16, fontSize: 11, color: "#556677" }}>
+                  <span><span style={{ color: "#00ff87" }}>■</span> Champions</span>
+                  <span><span style={{ color: "#4488ff" }}>■</span> Europa League</span>
+                </div>
+                <StandingsTable standings={standings} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* SCORERS TAB */}
+        {activeTab === "scorers" && (
+          <div style={{ animation: "slideIn .3s ease" }}>
+            {!leagueId ? (
+              <div style={{ textAlign: "center", padding: 50, color: "#556677" }}>Liga no disponible</div>
+            ) : scorers.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 50, color: "#556677" }}>Cargando goleadores...</div>
+            ) : (
+              <div style={{ background: "#0d1526", border: "1px solid #ffffff0d", borderRadius: 16, overflow: "hidden" }}>
+                {scorers.map((s, i) => (
+                  <div key={s.player.id} style={{
+                    display: "flex", alignItems: "center", gap: 14,
+                    padding: "12px 18px",
+                    borderBottom: i < scorers.length - 1 ? "1px solid #ffffff08" : "none",
+                    background: i === 0 ? "#f0c04008" : "transparent",
+                  }}>
+                    <div style={{
+                      width: 28, height: 28, borderRadius: "50%",
+                      background: i === 0 ? "linear-gradient(135deg,#f0c040,#ff8800)" : i === 1 ? "linear-gradient(135deg,#aaaaaa,#666)" : i === 2 ? "linear-gradient(135deg,#cd7f32,#8b4513)" : "#1a2a3a",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 12, fontWeight: 900, color: "#fff", flexShrink: 0,
+                    }}>{i + 1}</div>
+                    <TeamCrest url={s.team?.crest} name={s.team?.name} size={28} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: "#e8eaf6" }}>{s.player.name}</div>
+                      <div style={{ fontSize: 11, color: "#556677" }}>{s.team?.shortName || s.team?.name} · {s.player.nationality}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{
+                        fontFamily: "'Oswald',sans-serif", fontSize: 22, fontWeight: 900,
+                        color: i === 0 ? "#f0c040" : "#00ff87",
+                      }}>{s.goals}</div>
+                      <div style={{ fontSize: 10, color: "#556677" }}>goles</div>
+                    </div>
+                    {s.assists != null && (
+                      <div style={{ textAlign: "right", minWidth: 36 }}>
+                        <div style={{ fontFamily: "'Oswald',sans-serif", fontSize: 16, fontWeight: 700, color: "#8899bb" }}>{s.assists}</div>
+                        <div style={{ fontSize: 10, color: "#445566" }}>asist</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* NEWS TAB */}
+        {activeTab === "news" && (
+          <div style={{ animation: "slideIn .3s ease" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontSize: 13, color: "#556677" }}>Noticias recientes de {LEAGUE_INFO[activeLeague]?.name}</div>
+              <button onClick={fetchNews} style={{
+                padding: "6px 16px", borderRadius: 20, border: "1px solid #00ff8733",
+                background: "#00ff8715", color: "#00ff87", fontSize: 12, fontWeight: 600,
+                cursor: "pointer",
+              }}>
+                🔄 Actualizar
+              </button>
+            </div>
+            {newsLoading ? (
+              <div style={{ textAlign: "center", padding: 60 }}>
+                <div style={{ fontSize: 32, marginBottom: 12, animation: "pulse 1s infinite" }}>📰</div>
+                <div style={{ color: "#556677" }}>Buscando noticias en tiempo real...</div>
+              </div>
+            ) : news.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 50, color: "#556677" }}>
+                <button onClick={fetchNews} style={{
+                  padding: "12px 28px", borderRadius: 20, border: "none",
+                  background: "linear-gradient(90deg,#00ff87,#00d4ff)",
+                  color: "#000", fontWeight: 700, cursor: "pointer", fontSize: 14,
+                }}>Cargar noticias</button>
+              </div>
+            ) : (
+              news.map((n, i) => (
+                <NewsCard key={i} title={n.title} summary={n.summary} source={n.source} date={n.date} url={n.url} />
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* FOOTER */}
+      <div style={{
+        textAlign: "center", padding: "20px 0 32px",
+        color: "#334455", fontSize: 11, borderTop: "1px solid #ffffff05",
+        marginTop: 20,
+      }}>
+        <span style={{ color: "#00ff8755", fontWeight: 700 }}>DREW FUTBOL</span>
+        {" · "}Datos: football-data.org · Noticias: Claude AI
+        <br />
+        <span style={{ fontSize: 10 }}>Actualización en tiempo real · Todas las ligas del mundo</span>
+      </div>
+    </div>
+  );
+}
